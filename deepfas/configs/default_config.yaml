@@ -1,0 +1,51 @@
+# Default configuration = the setting used for the experiments in the paper.
+# Run:  python run_pipeline.py --config configs/default_config.yaml --data <dataset root> --output <folder>
+
+output_root: results       # masks, maps, checkpoints, figures and metrics are written here
+seed: null                 # null = unseeded (as in the paper's runs); set an integer for repeatable runs
+device: null               # null = cuda if available, else cpu
+
+data:
+  # One root  -> official train/test partitions of that dataset (intra-dataset protocol).
+  # Several   -> the last root is the test set, the others are used for training.
+  base_paths:
+    - data/replay-attack
+  image_pattern: "cropped_*.jpg"
+  max_number_data: 4200    # images sampled in total (round-robin over the video folders)
+  train_test_split: 0.25   # 3,150 train / 1,050 test
+  image_size: 520
+
+loader:
+  batch_size: 28
+  num_workers: null        # null = os.cpu_count()
+
+segmentation:              # LoRA fine-tuning of DeepLabV3 (ResNet-101)
+  epochs: 20
+  learning_rate: 1.0e-4    # Adam
+  lora_rank: 32            # r
+  lora_alpha: 64           # scaling = alpha / r = 2
+  early_stopping_start_epoch: 10   # 0-based; early stopping and checkpointing start at epoch 11
+  early_stopping_patience: 3       # stop on the 5th consecutive epoch without IoU improvement
+  lr_decay_lower: 0.95             # 0.95 < IoU < 0.955 -> lr x 0.5
+  lr_decay_upper: 0.955            # IoU > 0.955        -> lr x 0.1
+  lr_decay_factor_mid: 0.5
+  lr_decay_factor_high: 0.1
+  save_epoch_checkpoints: true
+
+classifier:                # lightweight Transformer on the binary maps
+  epochs: 15
+  learning_rate: 1.0e-4    # AdamW
+  weight_decay: 1.0e-4
+  patch_size: 20           # 520 / 20 = 26 x 26 = 676 patches
+  embed_dim: 128
+  num_heads: 4
+  num_layers: 2
+  mlp_dim: 256
+  dropout: 0.1
+  num_classes: 2
+
+evaluation:
+  threshold: 0.5           # on P(live), for APCER / BPCER / ACER
+  pixel_auc: true          # pixel-level ROC-AUC of the fine-tuned DeepLabV3 (memory-heavy)
+  plot_examples: true
+  pretrained_baseline: false
