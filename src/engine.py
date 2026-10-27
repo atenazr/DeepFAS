@@ -2,10 +2,11 @@
 Training and evaluation steps of the pipeline.
 
 Step 1  create_masks            training masks: live -> DeepLabV3 foreground, spoof -> all black
-Step 2  fine_tune_model         LoRA fine-tuning of DeepLabV3 on these masks
+Step 2  fine_tune_model         LoRA fine-tuning of DeepLabV3 on these masks (20 epochs)
 Step 3  create_feature_maps     binary maps predicted by the fine-tuned DeepLabV3
 Step 4  train_classifier        lightweight Transformer on the binary maps
 Step 5  evaluate_classifier     Accuracy, FAR/FRR/HTER, AUC, APCER/BPCER/ACER
+        extract_embeddings      classifier embeddings for the PCA / t-SNE / UMAP plots
 """
 
 from pathlib import Path
@@ -70,25 +71,18 @@ def create_live_mask(image: torch.Tensor, mask_path: str, mask_model, device: st
     save_live_mask(output_prediction, mask_path, image_size)
 
 
-def create_masks(loader, mask_model, device: str, image_size: int, spoofed_masks: bool = False) -> None:
+def create_masks(loader, mask_model, device: str, image_size: int) -> None:
     """
-    Write the training mask of every image in ``loader``.
-
-    Default: live samples get the foreground mask of the pre-trained DeepLabV3,
-    spoof samples get an all-black mask.
-    ``spoofed_masks=True``: only spoof samples are processed and they receive
-    the pre-trained DeepLabV3 mask (live samples are skipped).
+    Write the training mask of every image in ``loader``: live samples get the
+    foreground mask of the pre-trained DeepLabV3, spoof samples get an
+    all-black mask. These are the targets of the LoRA fine-tuning.
     """
     for images, labels, _, mask_paths, _ in tqdm(loader, desc="Creating masks"):
         for image, label, mask_path in zip(images, labels, mask_paths):
-            if spoofed_masks:
-                if label.item() == SPOOF_LABEL:
-                    create_live_mask(image, mask_path, mask_model, device, image_size)
+            if label.item() == LIVE_LABEL:
+                create_live_mask(image, mask_path, mask_model, device, image_size)
             else:
-                if label.item() == LIVE_LABEL:
-                    create_live_mask(image, mask_path, mask_model, device, image_size)
-                else:
-                    create_spoof_mask(mask_path, image_size)
+                create_spoof_mask(mask_path, image_size)
 
 
 # ===========================================================================
@@ -172,66 +166,36 @@ def apply_lr_decay(optimizer, epoch_iou: float, cfg) -> None:
         param_group["lr"] *= factor
 
 
+def final_checkpoint_name(epochs: int) -> str:
+    return f"Epoch-{epochs}.pth.tar"
+
+
 def fine_tune_model(model, loss_function, optimizer, train_loader, val_loader, cfg, device: str,
                     checkpoint_dir):
     """
-    Fine-tune the LoRA-adapted DeepLabV3.
+    Fine-tune the LoRA-adapted DeepLabV3 for ``cfg.epochs`` (20) epochs.
 
-    After each epoch the IoU on ``val_loader`` is computed (in the paper's
-    experiments this is the test partition; there is no separate validation
-    split). It is used for:
+    There is no early stopping. After each epoch the IoU on ``val_loader`` is
+    computed (in the paper's experiments this is the test partition; there is
+    no separate validation split) and used for the learning-rate decay, see
+    ``apply_lr_decay``.
 
-    * Early stopping, active from epoch index ``early_stopping_start_epoch``
-      (10, i.e. the 11th epoch). An epoch "improves" when its IoU is strictly
-      higher than every previous epoch's IoU. A non-improving epoch increases a
-      counter; an improving one resets it. When a non-improving epoch finds the
-      counter already above ``early_stopping_patience`` (3), training stops,
-      i.e. on the 5th consecutive non-improving epoch. That last epoch is
-      trained but not added to the history.
-    * Checkpointing (same epochs): ``Epoch-<n>.pth.tar`` is saved when the IoU
-      improves or the training loss is lower than every previous epoch's loss.
-    * Learning-rate decay, see ``apply_lr_decay``.
+    After the last epoch the model is saved as ``Epoch-<epochs>.pth.tar`` in
+    ``checkpoint_dir``. This final-epoch model is the model used in all
+    experiments; no other checkpoint is saved or reloaded.
 
-    The model returned is the model after the last trained epoch; no
-    checkpoint is reloaded.
-
-    Returns ``(history, info)``: per-epoch ``train_loss`` / ``val_iou`` and a
-    dict with the number of trained epochs and whether early stopping fired.
+    Returns the per-epoch ``train_loss`` / ``val_iou`` history.
     """
-    checkpoint_dir = Path(checkpoint_dir)
     train_loss_history = []
     val_iou_history = []
-
-    counter = 0
-    epochs_trained = 0
-    stopped_early = False
 
     for epoch in range(cfg.epochs):
         print(f"Epoch: {epoch + 1}/{cfg.epochs} " + "-" * 62)
 
         running_loss = train_segmentation_epoch(model, train_loader, loss_function, optimizer, device)
         epoch_loss = running_loss / len(train_loader.dataset)
-        epochs_trained = epoch + 1
 
         epoch_val_iou = compute_dataset_iou(model, val_loader, device)
-
-        if epoch >= cfg.early_stopping_start_epoch:
-            iou_improved = all(i < epoch_val_iou for i in val_iou_history)
-            loss_improved = all(i > epoch_loss for i in train_loss_history)
-
-            if cfg.save_epoch_checkpoints and (iou_improved or loss_improved):
-                checkpoint = {"state_dict": model.state_dict(), "optimizer": optimizer.state_dict()}
-                save_checkpoint(checkpoint, checkpoint_dir / f"Epoch-{epoch + 1}.pth.tar")
-
-            if iou_improved:
-                counter = 0
-            elif counter > cfg.early_stopping_patience:
-                print(f"Train Loss: {epoch_loss:.4f} - Validation IoU: {epoch_val_iou:.4f}")
-                print("No improvement in validation IoU. Stopping training.")
-                stopped_early = True
-                break
-            else:
-                counter += 1
 
         val_iou_history.append(epoch_val_iou)
         train_loss_history.append(epoch_loss)
@@ -241,8 +205,13 @@ def fine_tune_model(model, loss_function, optimizer, train_loader, val_loader, c
         apply_lr_decay(optimizer, epoch_val_iou, cfg)
 
     history = pd.DataFrame({"train_loss": train_loss_history, "val_iou": val_iou_history})
+
+    # Save the model of the final epoch; this is the model used in all experiments.
+    checkpoint = {"state_dict": model.state_dict(), "optimizer": optimizer.state_dict()}
+    save_checkpoint(checkpoint, Path(checkpoint_dir) / final_checkpoint_name(cfg.epochs))
+
     print("Training is Done.")
-    return history, {"epochs_trained": epochs_trained, "stopped_early": stopped_early}
+    return history
 
 
 def calculate_pixel_auc(model, loader, device: str, output_root) -> float:
@@ -416,3 +385,48 @@ def evaluate_classifier(model, loader, device: str, output_root, threshold: floa
     print(f"AUC  : {metrics['AUC']:.4f}")
     print(f"APCER: {metrics['APCER']:.4f}   BPCER: {metrics['BPCER']:.4f}   ACER : {metrics['ACER']:.4f}")
     return metrics
+
+
+def extract_embeddings(model, loader, device: str):
+    """
+    Embeddings of the classifier for every sample in ``loader``: the feature
+    vector entering the final ``nn.Linear`` layer (the classification layer),
+    captured with a forward hook. For ``BinaryMapTransformer`` this is the
+    128-dimensional input of ``classifier[6]``.
+
+    Returns ``(embeddings, labels)`` as NumPy arrays.
+    """
+    model = model.to(device)
+    model.eval()
+
+    linear_layers = [(name, m) for name, m in model.named_modules() if isinstance(m, nn.Linear)]
+    if not linear_layers:
+        raise ValueError("No Linear layer found in the model.")
+    final_layer_name, final_layer = linear_layers[-1]
+    print(f"Final classification layer: {final_layer_name} {final_layer}")
+
+    captured = {}
+
+    def hook_fn(module, inputs, output):
+        captured["embedding"] = inputs[0].detach()
+
+    hook_handle = final_layer.register_forward_hook(hook_fn)
+    all_embeddings, all_labels = [], []
+    try:
+        with torch.no_grad():
+            for _, labels, _, _, map_paths in loader:
+                maps = load_binary_masks(map_paths).float().to(device)
+                captured.clear()
+                model(maps)
+                embeddings = captured["embedding"]
+                if embeddings.dim() > 2:
+                    embeddings = torch.flatten(embeddings, start_dim=1)
+                all_embeddings.append(embeddings.cpu().numpy())
+                all_labels.append(labels.cpu().numpy())
+    finally:
+        hook_handle.remove()
+
+    all_embeddings = np.concatenate(all_embeddings, axis=0)
+    all_labels = np.concatenate(all_labels, axis=0)
+    print(f"Extracted embeddings shape: {all_embeddings.shape}")
+    return all_embeddings, all_labels

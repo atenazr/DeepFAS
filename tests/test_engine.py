@@ -37,37 +37,33 @@ def _run_schedule(monkeypatch, tmp_path, ious, losses, epochs=20):
     monkeypatch.setattr(engine, "apply_lr_decay", record_decay)
 
     cfg = SegmentationConfig(epochs=epochs)
-    history, info = engine.fine_tune_model(model, None, optimizer, _FakeLoader(), None, cfg, "cpu", tmp_path)
-    saved = sorted(int(p.name.split("-")[1].split(".")[0]) for p in tmp_path.glob("Epoch-*.pth.tar"))
-    return history, info, calls["train"], lrs, saved
+    history = engine.fine_tune_model(model, None, optimizer, _FakeLoader(), None, cfg, "cpu", tmp_path)
+    saved = sorted(p.name for p in tmp_path.glob("*.pth.tar"))
+    return history, calls["train"], lrs, saved
 
 
-def test_early_stopping_fires_on_fifth_non_improving_epoch(monkeypatch, tmp_path):
-    # Improves until epoch 11 (index 10), then never again.
-    ious = [0.80 + 0.01 * i for i in range(11)] + [0.85] * 9
-    losses = [1.0 - 0.01 * i for i in range(20)]
-    history, info, n_train, lrs, saved = _run_schedule(monkeypatch, tmp_path, ious, losses)
-
-    assert n_train == 16                      # epochs 12-15 increase the counter, epoch 16 stops
-    assert info == {"epochs_trained": 16, "stopped_early": True}
-    assert len(history) == 15                 # the stopping epoch is not added to the history
-    # Checkpoints from epoch 11 on, when IoU or training loss improves (loss improves every epoch here).
-    assert saved == list(range(11, 17))
-
-
-def test_no_early_stopping_before_epoch_11(monkeypatch, tmp_path):
-    ious = [0.5] * 20
+def test_all_epochs_are_trained_without_early_stopping(monkeypatch, tmp_path):
+    # IoU stops improving after epoch 3: training must still run all 20 epochs.
+    ious = [0.80, 0.85, 0.90] + [0.50] * 17
     losses = [1.0] * 20
-    history, info, n_train, _, saved = _run_schedule(monkeypatch, tmp_path, ious, losses)
-    # Epochs 1-10 are never checked; epochs 11-14 count up, epoch 15 stops.
-    assert n_train == 15 and info["stopped_early"] and len(history) == 14
-    assert saved == []                        # nothing improves strictly
+    history, n_train, _, saved = _run_schedule(monkeypatch, tmp_path, ious, losses)
+
+    assert n_train == 20
+    assert len(history) == 20
+    assert history["val_iou"].tolist() == ious
+    assert saved == ["Epoch-20.pth.tar"]      # only the final-epoch model is saved
+
+
+def test_final_checkpoint_holds_final_model(monkeypatch, tmp_path):
+    _run_schedule(monkeypatch, tmp_path, [0.5] * 3, [1.0] * 3, epochs=3)
+    checkpoint = torch.load(tmp_path / "Epoch-3.pth.tar")
+    assert set(checkpoint) == {"state_dict", "optimizer"}
 
 
 def test_lr_decay_rules(monkeypatch, tmp_path):
     ious = [0.94, 0.951, 0.95, 0.955, 0.96, 0.9549] + [0.97 + 0.001 * i for i in range(14)]
     losses = [1.0] * 20
-    _, info, _, lrs, _ = _run_schedule(monkeypatch, tmp_path, ious, losses)
+    history, n_train, lrs, _ = _run_schedule(monkeypatch, tmp_path, ious, losses)
     base = 1e-4
     expected = [base,                 # 0.94   -> no change
                 base * 0.5,           # 0.951  -> x0.5
@@ -76,7 +72,7 @@ def test_lr_decay_rules(monkeypatch, tmp_path):
                 base * 0.05,          # 0.96   -> x0.1
                 base * 0.025]         # 0.9549 -> x0.5
     assert np.allclose(lrs[:6], expected)
-    assert info == {"epochs_trained": 20, "stopped_early": False}
+    assert n_train == 20 and len(lrs) == 20
 
 
 def test_classification_metrics():
@@ -103,3 +99,57 @@ def test_live_and_spoof_masks(tmp_path):
     spoof = np.array(Image.open(tmp_path / "spoof.png").convert("L")) > 0
     assert live.sum() == 16 and live[2:6, 2:6].all()
     assert spoof.sum() == 0
+
+
+class _PersonModel(nn.Module):
+    """Stand-in for the pre-trained DeepLabV3: predicts "person" in the image centre."""
+
+    def forward(self, x):
+        out = torch.zeros(x.shape[0], 21, x.shape[2], x.shape[3])
+        out[:, 0] = 1.0
+        out[:, 15, 2:6, 2:6] = 2.0
+        return {"out": out}
+
+
+def _mask_batch(tmp_path):
+    images = torch.zeros(2, 3, 8, 8)
+    labels = torch.tensor([1, 0])                                # live, spoof
+    paths = [str(tmp_path / "live" / "mask.png"), str(tmp_path / "spoof" / "mask.png")]
+    return [(images, labels, ["a", "b"], paths, ["", ""])], paths
+
+
+def _white_pixels(path):
+    return int((np.array(Image.open(path).convert("L")) > 0).sum())
+
+
+def test_create_masks_training_targets(tmp_path):
+    loader, (live_path, spoof_path) = _mask_batch(tmp_path)
+    engine.create_masks(loader, _PersonModel(), "cpu", image_size=8)
+    assert _white_pixels(live_path) == 16                        # pre-trained DeepLabV3 foreground
+    assert _white_pixels(spoof_path) == 0                        # all black
+
+
+def test_extract_embeddings(tmp_path):
+    from src.models import BinaryMapTransformer
+
+    paths = []
+    for k in range(5):
+        p = tmp_path / f"map_{k}.png"
+        Image.new("1", (40, 40), k % 2).save(p)
+        paths.append(str(p))
+    loader = [(None, torch.tensor([0, 1, 0]), None, None, paths[:3]),
+              (None, torch.tensor([1, 0]), None, None, paths[3:])]
+
+    model = BinaryMapTransformer(image_size=40, patch_size=20)
+    embeddings, labels = engine.extract_embeddings(model, loader, "cpu")
+    assert embeddings.shape == (5, 128)                          # input of the final Linear(128, 2)
+    assert labels.tolist() == [0, 1, 0, 1, 0]
+
+    # The hook must capture exactly the input of the classification layer.
+    model.eval()
+    maps = torch.stack([torch.from_numpy(np.array(Image.open(p).convert("L")) > 0).float().unsqueeze(0)
+                        for p in paths])
+    with torch.no_grad():
+        logits = model(maps)
+    final = model.classifier[-1]
+    assert torch.allclose(final(torch.from_numpy(embeddings)), logits, atol=1e-6)

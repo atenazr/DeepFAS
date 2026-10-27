@@ -169,3 +169,57 @@ def plot_roc(fpr, tpr, auc, label, title, save_path: Path, dpi: int = 600) -> No
     save_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(save_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
+
+
+def plot_dimensionality_reduction(embeddings, labels, output_root, class_names=("spoof", "live"),
+                                  title_prefix="BinaryMapTransformer", random_state=42) -> dict:
+    """
+    2-D PCA, t-SNE and UMAP projections of the classifier embeddings, colored by
+    class (index 0 = spoof, 1 = live). Saved as ``<title_prefix>_{PCA,tSNE,UMAP}.png``.
+
+    t-SNE: perplexity 30, 1000 iterations; t-SNE and UMAP use ``random_state=42``.
+    Returns the PCA explained-variance ratios.
+    """
+    import seaborn as sns
+    import umap
+    from sklearn.decomposition import PCA
+    from sklearn.manifold import TSNE
+
+    output_root = Path(output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+    class_names = list(class_names)
+    hue = [class_names[int(x)] for x in labels]
+    palette = sns.color_palette("husl", len(class_names))
+
+    def scatter(points, title, xlabel, ylabel, filename):
+        fig = plt.figure(figsize=(8, 6))
+        sns.scatterplot(x=points[:, 0], y=points[:, 1], hue=hue, palette=palette, alpha=0.7)
+        plt.title(f"{title} - {title_prefix} Embeddings", fontsize=14)
+        plt.xlabel(xlabel)
+        plt.ylabel(ylabel)
+        plt.legend(title="Classes")
+        plt.tight_layout()
+        plt.savefig(output_root / filename, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+    print("Computing PCA...")
+    pca = PCA(n_components=2)
+    pca_result = pca.fit_transform(embeddings)
+    print("PCA explained variance:", pca.explained_variance_ratio_)
+    scatter(pca_result, "PCA", "Principal Component 1", "Principal Component 2", f"{title_prefix}_PCA.png")
+
+    perplexity = 30
+    if len(embeddings) > perplexity:
+        print("Computing t-SNE...")
+        tsne = TSNE(n_components=2, perplexity=perplexity, max_iter=1000, random_state=random_state)
+        tsne_result = tsne.fit_transform(embeddings)
+        scatter(tsne_result, "t-SNE", "t-SNE Dimension 1", "t-SNE Dimension 2", f"{title_prefix}_tSNE.png")
+    else:
+        print(f"Skipping t-SNE: it needs more than {perplexity} samples (perplexity {perplexity}).")
+
+    print("Computing UMAP...")
+    umap_reducer = umap.UMAP(n_components=2, random_state=random_state)
+    umap_result = umap_reducer.fit_transform(embeddings)
+    scatter(umap_result, "UMAP", "UMAP Dimension 1", "UMAP Dimension 2", f"{title_prefix}_UMAP.png")
+
+    return {"pca_explained_variance_ratio": [float(v) for v in pca.explained_variance_ratio_]}

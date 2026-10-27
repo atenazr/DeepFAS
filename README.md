@@ -1,6 +1,6 @@
 # DEEPFAS: Face Anti-Spoofing with LoRA-Adapted DeepLabV3 Masks and a Lightweight Transformer
 
-Official code for the paper **"PAPER TITLE"** (submitted to *IEEE Access*).
+Official code for the paper **"PAPER TITLE"**.
 
 The pipeline decides whether a face image is **live** (bona fide) or a **spoof** (presentation attack) in two stages:
 
@@ -22,10 +22,10 @@ flowchart LR
 | Step | What happens | Code |
 |---|---|---|
 | 1. Training masks | Live images: foreground predicted by the pre-trained DeepLabV3 (torchvision `COCO_WITH_VOC_LABELS_V1` weights). Attack images: all-black mask. | `engine.create_masks` |
-| 2. LoRA fine-tuning | LoRA (r = 32, α = 64) on the 3×3 `conv2` of the three bottleneck blocks of `layer4`; new 1×1 output convolution with sigmoid; all other weights frozen (491,777 trainable parameters). MSE loss, Adam (lr 1e-4), batch 28, up to 20 epochs. | `models.ModifiedDeepLabV3_DeepLoRA`, `engine.fine_tune_model` |
-| 3. Binary maps | Output of the fine-tuned model binarized at 0.5. | `engine.create_feature_maps` |
+| 2. LoRA fine-tuning | LoRA (r = 32, α = 64) on the 3×3 `conv2` of the three bottleneck blocks of `layer4`; new 1×1 output convolution with sigmoid; all other weights frozen (491,777 trainable parameters). MSE loss, Adam (lr 1e-4), batch 28, 20 epochs. The final-epoch model is used. | `models.ModifiedDeepLabV3_DeepLoRA`, `engine.fine_tune_model` |
+| 3. Binary maps | Output of the fine-tuned model binarized at 0.5. The classifier uses only these predicted maps. | `engine.create_feature_maps` |
 | 4. Classifier | Patch size 20 (676 tokens), embedding 128, 2 pre-norm encoder layers, 4 heads, MLP 256, dropout 0.1, average pooling, MLP head (469,250 parameters). Cross-entropy, AdamW (lr 1e-4, weight decay 1e-4), batch 28, 15 epochs. | `models.BinaryMapTransformer`, `engine.train_classifier` |
-| 5. Evaluation | Accuracy, FAR / FRR / HTER, AUC, APCER / BPCER / ACER. | `engine.evaluate_classifier` |
+| 5. Evaluation | Accuracy, FAR / FRR / HTER, AUC, APCER / BPCER / ACER; PCA, t-SNE and UMAP plots of the classifier embeddings (input of its last linear layer) on the test set. | `engine.evaluate_classifier`, `engine.extract_embeddings`, `utils.plot_dimensionality_reduction` |
 
 All values are set in [`configs/default_config.yaml`](configs/default_config.yaml).
 
@@ -121,7 +121,7 @@ python run_pipeline.py --output results/replay-attack --data data/replay-attack 
 python run_pipeline.py --output results/replay-attack --data data/replay-attack --steps maps classify
 ```
 
-`--steps maps classify` loads `<output>/checkpoints/deeplabv3_lora_final.pth.tar`, or the file given with `--segmentation-checkpoint`. Use `--resample` to draw new image lists, `--seed N` for a seeded run and `--device cpu|cuda` to choose the device.
+`maps` without `finetune` loads `<output>/checkpoints/Epoch-20.pth.tar`, or the file given with `--segmentation-checkpoint`. Use `--resample` to draw new image lists, `--seed N` for a seeded run and `--device cpu|cuda` to choose the device.
 
 **Cross-dataset setting.** With several roots, e.g. `--data data/msu data/replay-attack`, the last root is used for testing and the others for training. This option is not used for the results in the paper (all reported experiments are intra-dataset).
 
@@ -133,14 +133,15 @@ Everything is written to the output folder:
 |---|---|
 | `metrics.json` | all results of the run (segmentation, classifier, run times) |
 | `classifier_metrics.json` | Accuracy, FAR, FRR, HTER, AUC, APCER, BPCER, ACER |
-| `segmentation_metrics.json` | test IoU and pixel-level AUC of the fine-tuned DeepLabV3, epochs trained |
+| `segmentation_metrics.json` | test IoU and pixel-level AUC of the fine-tuned DeepLabV3 |
 | `training.csv`, `loss-function-train-validation-deeplabv3.{png,pdf}` | fine-tuning history |
 | `classifier_training.csv` | classifier training loss and accuracy per epoch |
 | `transformer_roc_curve.png`, `finetuned-deeplabv3-roc.png` | ROC curves |
+| `BinaryMapTransformer_{PCA,tSNE,UMAP}.png` | 2-D projections of the classifier embeddings (test set) |
 | `images-masks-finetuned.{png,pdf}` | example images with true and predicted masks |
-| `checkpoints/` | `deeplabv3_lora_final.pth.tar` (final model), `Epoch-<n>.pth.tar`, `transformer_classifier.pth` |
+| `checkpoints/` | `Epoch-20.pth.tar` (fine-tuned DeepLabV3, final epoch), `transformer_classifier.pth` |
 | `splits/` | the sampled train / test image lists |
-| `<…>/mask_*.png`, `<…>/map_*.png` | training masks and predicted binary maps, mirroring the input folders |
+| `<…>/mask_*.png`, `<…>/map_*.png` | training masks and binary maps predicted by the fine-tuned DeepLabV3, mirroring the input folders |
 | `config_used.yaml` | the configuration of the run |
 
 ## Evaluation protocol and reproducibility notes
@@ -148,11 +149,9 @@ Everything is written to the output folder:
 - **Partitions.** The official train and test partitions of each dataset are used (intra-dataset protocol).
 - **Sampling.** 4,200 images are sampled per dataset, 3,150 from the training partition and 1,050 from the test partition, taking one image per video folder in turn (round-robin) so that all videos are represented.
 - **Metrics** are computed per image. FAR, FRR and HTER use the argmax prediction; APCER, BPCER and ACER use P(live) ≥ 0.5. No threshold is tuned. With live = 1 and attack = 0, APCER = FAR and BPCER = FRR, so ACER equals HTER except for exact ties at 0.5.
-- **Fine-tuning schedule.** After every epoch the IoU is computed on the test partition (there is no separate validation split, as in the reported experiments). This IoU drives
-  - the learning-rate decay: lr × 0.5 when 0.95 < IoU < 0.955, lr × 0.1 when IoU > 0.955;
-  - early stopping from epoch 11 on: training stops at the fifth consecutive epoch whose IoU is not higher than all previous ones.
-- **Final model.** The fine-tuned DeepLabV3 used for the maps is the model after the last trained epoch. The `Epoch-<n>` checkpoints are kept for reference and are not reloaded.
-- **Randomness.** `seed: null` (default) leaves the run unseeded, as in the reported experiments, so the sampled images and the initialization differ between runs. Set `seed` for repeatable sampling and initialization (some GPU operations may still be non-deterministic).
+- **Fine-tuning schedule.** DeepLabV3 is fine-tuned for a fixed 20 epochs, without early stopping. After every epoch the IoU is computed on the test partition (there is no separate validation split, as in the reported experiments) and drives the learning-rate decay: lr × 0.5 when 0.95 < IoU < 0.955, lr × 0.1 when IoU > 0.955.
+- **Final model.** The fine-tuned DeepLabV3 used for the maps is the model after epoch 20, saved as `checkpoints/Epoch-20.pth.tar`. No other checkpoint is saved or selected.
+- **Randomness.** `seed: null` (default) leaves the run unseeded, as in the reported experiments, so the sampled images and the initialization differ between runs. Set `seed` for repeatable sampling and initialization (some GPU operations may still be non-deterministic). t-SNE and UMAP use `random_state=42`.
 
 ## Tests
 
@@ -170,7 +169,7 @@ If you use this code, please cite:
 @article{KEY,
   author  = {AUTHORS},
   title   = {PAPER TITLE},
-  journal = {IEEE Access},
+  journal = {JOURNAL},
   year    = {YEAR},
   doi     = {DOI}
 }

@@ -38,19 +38,15 @@ class LoaderConfig:
 @dataclass
 class SegmentationConfig:
     """Stage 1: LoRA fine-tuning of DeepLabV3 (ResNet-101) for binary masks."""
-    epochs: int = 20
+    epochs: int = 20                       # fixed number of epochs (no early stopping)
     learning_rate: float = 1.0e-4
     lora_rank: int = 32
     lora_alpha: int = 64
-    # Early stopping (see engine.fine_tune_model for the exact rule).
-    early_stopping_start_epoch: int = 10   # 0-based epoch index; checks start at epoch 11
-    early_stopping_patience: int = 3       # "counter_limit" in the original code
     # Learning-rate decay driven by the per-epoch IoU.
     lr_decay_lower: float = 0.95           # lower < IoU < upper  -> lr *= lr_decay_factor_mid
     lr_decay_upper: float = 0.955          # IoU > upper          -> lr *= lr_decay_factor_high
     lr_decay_factor_mid: float = 0.5
     lr_decay_factor_high: float = 0.1
-    save_epoch_checkpoints: bool = True    # Epoch-<n>.pth.tar files, as in the original runs
 
 
 @dataclass
@@ -74,6 +70,7 @@ class EvaluationConfig:
     pixel_auc: bool = True                 # pixel-level ROC-AUC of the fine-tuned DeepLabV3
     plot_examples: bool = True             # figure with images, masks and predictions
     pretrained_baseline: bool = False      # IoU of the off-the-shelf DeepLabV3 (person class)
+    embedding_plots: bool = True           # PCA / t-SNE / UMAP of the classifier embeddings (test set)
 
 
 @dataclass

@@ -2,10 +2,12 @@ torch>=2.0
 torchvision>=0.15
 numpy
 pandas
-scikit-learn
+scikit-learn>=1.5
 Pillow
 opencv-python
 matplotlib
+seaborn
+umap-learn
 tqdm
 PyYAML
 torchinfo

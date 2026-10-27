@@ -1,9 +1,10 @@
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 import torch
 from PIL import Image
 from torchvision import transforms
 import matplotlib.pyplot as plt
 import csv
+
 import warnings
 warnings.filterwarnings('ignore')
 import os
@@ -31,11 +32,11 @@ import math
 import torch.nn.functional as F
 from sklearn.metrics import confusion_matrix
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 # Base directory --- tha last path would be test data, others train
 BASE_PATH = [
-'/kaggle/input/datasets/atenazare/reply-original',
-            # '/kaggle/input/datasets/atenazare/msu-original'
+# '/kaggle/input/datasets/atenazare/reply-original',
+            '/kaggle/input/datasets/atenazare/msu-original'
             ] 
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu' # Computation device
@@ -60,7 +61,7 @@ OUTPUT_ROOT = "/kaggle/working/results" # in this root, generated masks, feature
 
 print(f'Device: {DEVICE}') # Print the chosen device
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 class InvTransform(object):
     """
     Inverse the standardization applied to images.
@@ -92,7 +93,7 @@ class InvTransform(object):
 
 inv_transform = InvTransform(INV_MEAN, INV_STD)
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 class Binarize(object):
     """
     A custom transformer to binarize the masks based on a threshold.
@@ -119,7 +120,7 @@ class Binarize(object):
 
 binarize = Binarize(threshold=0.5)
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 IMAGE_TRANSFORM = transforms.Compose([
         transforms.Resize((WIDTH, HEIGHT)),    # Resize images
         transforms.ToTensor(),    # Convert nd.arrays into torch.tensors and scale the values in the range of [0, 1]
@@ -132,7 +133,7 @@ MASK_TRANSFORM = transforms.Compose([
         Binarize(threshold=0.5),    # Binarize the values
 ])
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 def collect_images(root, split):
     """
         Collect images by folder.
@@ -179,7 +180,7 @@ def collect_images(root, split):
 
     return groups
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 def round_robin_sample(groups, target_size):
     """
     Take one image from each folder repeatedly until target_size is reached.
@@ -223,7 +224,7 @@ def round_robin_sample(groups, target_size):
 
     return sampled
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 train_groups = collect_images(BASE_PATH, "train")
 test_groups = collect_images(BASE_PATH, "test")
 
@@ -233,13 +234,13 @@ train_files = round_robin_sample(train_groups,
 test_files = round_robin_sample(test_groups,
                                 MAX_NUMBER_DATA*TRAIN_TEST_SPLIT)
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 print(f"Train images: {len(train_files)}")
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 print(f"Test images: {len(test_files)}")
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 class CreateDataset(Dataset):
     
     def __init__(self, files, transform=None):
@@ -276,14 +277,14 @@ class CreateDataset(Dataset):
 
         return (image,label,str(img_path),str(mask_path),str(map_path))
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 # Datasets
 # ==========================================================
 
 train_dataset = CreateDataset(train_files,IMAGE_TRANSFORM)
 test_dataset = CreateDataset(test_files,IMAGE_TRANSFORM)
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 # DataLoaders
 # ==========================================================
 
@@ -305,24 +306,24 @@ test_loader = DataLoader(
 
 len (test_loader),len(train_loader)
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 """
 ------------ Phase 1 --------------
 WE CREATE BINARY MASKS FOR EACH IMAGE WITH DEEPLABV3 ---- HUMAN = WHITE, BACKGROUND = BLACK 
 """
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 model = segmentation.deeplabv3_resnet101(pretrained=True)
 model = model.to(DEVICE)
 MASKS_CREATOR_MODEL = model.eval()
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 def create_spoof_mask(path):
   spoofed_mask = Image.new(mode="1",size=(WIDTH, HEIGHT))
   os.makedirs(os.path.dirname(path), exist_ok=True)  
   spoofed_mask.save(path)
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 def save_live_mask(output_prediction,path):
   # create a color pallette, selecting a color for each class
   palette = torch.tensor([2 ** 25 - 1, 2 ** 15 - 1, 2 ** 21 - 1])
@@ -343,7 +344,7 @@ def save_live_mask(output_prediction,path):
   os.makedirs(os.path.dirname(path), exist_ok=True)  
   img.save(path)
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 def create_live_mask(image,mask_path):
     image = image.unsqueeze(0)
     image = image.to(DEVICE)
@@ -352,33 +353,29 @@ def create_live_mask(image,mask_path):
     output_prediction = output.argmax(0)
     save_live_mask(output_prediction,mask_path)
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
-def create_masks(loader,spoofed_masks=False):
+# %% [code]
+def create_masks(loader):
     for images, labels, image_paths, mask_paths, map_paths in loader:
 
         for image, label, mask_path in zip(images, labels, mask_paths):
-            if spoofed_masks == True:
-                if label.item() == 0:
-                    create_live_mask(image, mask_path)
+            if label.item() == 1:
+                create_live_mask(image, mask_path)
             else:
-                if label.item() == 1:
-                    create_live_mask(image, mask_path)
-                else:
-                    create_spoof_mask(mask_path)
+                create_spoof_mask(mask_path)
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 create_masks(train_loader)
 
 # %% [code]
 create_masks(test_loader)
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 """
 ------------ Phase 2 --------------
 WITH CREATED BINARY MASKS IN THE PREVIOUS PHASE, WE WILL FINE-TUNE DEEPLABV3 
 """
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 def convert_to_tensor(file_path):
     image = Image.open(file_path)
 
@@ -391,7 +388,7 @@ def convert_to_tensor(file_path):
     
     return img_tensor
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 def convert_paths_tensors(paths):
     tensors = torch.stack([
         torch.from_numpy(
@@ -400,7 +397,7 @@ def convert_paths_tensors(paths):
         for p in paths]).long()
     return tensors
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 def apply_mask_overlay(image, mask, color=(255,0,0), alpha=0.65):
     """
     Overlays a binary mask on an image with a specified color and transparency.
@@ -425,7 +422,7 @@ def apply_mask_overlay(image, mask, color=(255,0,0), alpha=0.65):
 
     return overlayed_image
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 def plot_images_and_masks(images, masks, predicted_masks=None,mean_iou=None,masks_to_tensor=False):
     """
     Display images alongside their actual masks and, if provided, the predicted masks.
@@ -505,7 +502,7 @@ def plot_images_and_masks(images, masks, predicted_masks=None,mean_iou=None,mask
 
 # it does show plot --- with this error = "Clipping input data to the valid range for imshow with RGB data ([0..1] for floats or [0..255] for integers). Got range [0.006862755..166.04646]."
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 def calculate_iou(pred_mask, true_masks):
     """
     Calculate Intersection over Union (IoU) for binary masks.
@@ -582,7 +579,7 @@ def compute_dataset_iou(model, loader, plot=False):
         else:
             return mean_iou # Return mean IoU score
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 class PretrainedDeepLabV3(nn.Module):
     """
     Pre-trained DeepLabV3 model with a ResNet-101 backbone (Transfer Learning).
@@ -635,7 +632,7 @@ def test_deeplabv3_mdoel(loader, plot=False):
 
 torch.cuda.empty_cache()
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 class LoRAConv2d(nn.Module):
     """Pure PyTorch LoRA wrapper for Conv2d layers."""
     def __init__(self, original_conv, r=32, alpha=64):
@@ -719,7 +716,7 @@ class ModifiedDeepLabV3_DeepLoRA(nn.Module):
         x = self.model(x)['out']
         return self.sigmoid(x)
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 def train_model(model, loader, loss_function, optimizer):
     """
     Train the input model for one epoch.
@@ -787,8 +784,8 @@ def load_checkpoint(filename, model, optimizer):
     model.load_state_dict(checkpoint["state_dict"])  # Load model state
     optimizer.load_state_dict(checkpoint["optimizer"])  # Load optimizer state
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
-def fine_tune_model(model, loss_function, optimizer, train_loader, val_loader, num_epochs=EPOCHS, counter_limit=3):
+# %% [code]
+def fine_tune_model(model, loss_function, optimizer, train_loader, val_loader, num_epochs=EPOCHS):
     """
     Fine-tune the pre-trained DeepLabV3 model.
 
@@ -799,7 +796,6 @@ def fine_tune_model(model, loss_function, optimizer, train_loader, val_loader, n
         train_loader (DataLoader): DataLoader providing training data.
         val_loader (DataLoader): DataLoader providing validation data.
         num_epochs (int): Number of epochs to train.
-        counter_limit (int): Number of epochs to wait before stopping training when there is no improvement in validation IoU.
 
     Returns:
         history (pd.DataFrame): A DataFrame containing:
@@ -810,8 +806,6 @@ def fine_tune_model(model, loss_function, optimizer, train_loader, val_loader, n
     train_loss_history = []
     val_iou_history = []
 
-    # Counter for early stopping
-    counter=0
     for epoch in range(num_epochs):
         print(f'Epoch: {epoch + 1}/{num_epochs} --------------------------------------------------------------',)
         # Train the model and compute training loss
@@ -820,29 +814,6 @@ def fine_tune_model(model, loss_function, optimizer, train_loader, val_loader, n
 
         # Compute validation Iou
         epoch_val_iou = compute_dataset_iou(model, val_loader)
-
-        # Save checkpoint if there is improvement
-        if epoch >= 10:
-            if (all(i < epoch_val_iou for i in val_iou_history)
-                or all(i > epoch_loss for i in train_loss_history)):
-
-                # Save model and optimizer state
-                checkpoint = {
-                    "state_dict": model.state_dict(),
-                    "optimizer": optimizer.state_dict()
-                }
-
-                filename = f'Epoch-{epoch+1}.pth.tar' # Name of the checkpoint to be saved
-                save_checkpoint(checkpoint, filename=filename)
-
-            # Update counter based on validation IoU improvement
-            if all(i < epoch_val_iou for i in val_iou_history):
-                counter = 0
-            elif counter > counter_limit:
-                print(f'No improvement for {counter_limit} epochs. Stopping training.')
-                break
-            else:
-                counter += 1
 
         # Store metrics
         val_iou_history.append(epoch_val_iou)
@@ -865,7 +836,12 @@ def fine_tune_model(model, loss_function, optimizer, train_loader, val_loader, n
     # History dataframe
     history = pd.DataFrame({'train_loss': train_loss_history, 'val_iou': val_iou_history})
 
-    # The final model is the model after the last trained epoch (no checkpoint is reloaded).
+    # Save the model of the final epoch; this is the model used in all experiments
+    checkpoint = {
+        "state_dict": model.state_dict(),
+        "optimizer": optimizer.state_dict()
+    }
+    save_checkpoint(checkpoint, filename=f'Epoch-{num_epochs}.pth.tar')
 
     print('Training is Done.')
 
@@ -880,10 +856,10 @@ optimizer = optim.Adam(deeplabv3_model.parameters(), lr=LEARNING_RATE) # Define 
 # Get model summary
 torchinfo.summary(deeplabv3_model, input_size=(1, 3, 520, 520))
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 history = fine_tune_model(deeplabv3_model, loss_function, optimizer, train_loader, test_loader)
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 def plot_history():
     """
     Generates a plot comparing the training losses and validation IoU scores over epochs.
@@ -912,17 +888,19 @@ def plot_history():
     
 plot_history()
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 # load fine-tuned deeplabv3
-# load_checkpoint("/kaggle/input/models/atenazare/finetuned-deeplabv3-reply-lora/pytorch/default/1/Epoch-19.pth.tar",deeplabv3_model,optimizer)
+# Final-epoch checkpoint (rank 32) saved by fine_tune_model; replace with the path of your saved checkpoint if it is stored elsewhere
+FINAL_CHECKPOINT = f"{OUTPUT_ROOT}/Epoch-{EPOCHS}.pth.tar"
+load_checkpoint(FINAL_CHECKPOINT,deeplabv3_model,optimizer)
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 fine_tuned_deeplabv3 = deeplabv3_model
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 compute_dataset_iou(deeplabv3_model,test_loader, plot=True)
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 def calculate_auc_roc_deeplabv3(model,loader):
     model.eval()
     all_preds = []
@@ -975,17 +953,17 @@ def calculate_auc_roc_deeplabv3(model,loader):
         plt.savefig(f"{OUTPUT_ROOT}/finetuned-deeplabv3-roc.png",dpi=600,bbox_inches="tight")
         plt.show()
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 calculate_auc_roc_deeplabv3(deeplabv3_model,test_loader)
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 """
 ------------ Phase 3 --------------
 WE CREATE BINARY FEATURE MAPS FOR EACH IMAGE WITH FINE-TUNED DEEPLABV3 FROM PREVIOUS PHASE 
-THEN, WE FINE-TUNED A CLASSIFIER TO PREDICT LABELS
+THEN, WE TRAIN A LIGHTWEIGHT TRANSFORMER CLASSIFIER TO PREDICT LABELS
 """
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 def create_feature_maps(model,loader):
     
     model.eval() # Set the model to evaluation mode
@@ -1011,13 +989,13 @@ def create_feature_maps(model,loader):
             
             save_image(predicted_mask, str(path))
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 create_feature_maps(fine_tuned_deeplabv3,test_loader)
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 create_feature_maps(fine_tuned_deeplabv3,train_loader)
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 class BinaryMapTransformer(nn.Module):
 
     def __init__(
@@ -1131,7 +1109,7 @@ class BinaryMapTransformer(nn.Module):
 
         return logits
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 def train_classifier(model,train_loader, test_loader):
     criterion = nn.CrossEntropyLoss()
     
@@ -1191,7 +1169,7 @@ def train_classifier(model,train_loader, test_loader):
             f"Accuracy: {train_accuracy:.2f}%"
         )
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 model = BinaryMapTransformer(
     image_size=520,
     patch_size=20,
@@ -1204,19 +1182,19 @@ model = BinaryMapTransformer(
     num_classes=2
 ).to(DEVICE)
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 def count_params(model):
     total = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     return total, trainable
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 count_params(model)
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 train_classifier(model,train_loader, test_loader)
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 def calculate_metrics(model,test_loader):
     model.eval()
     
@@ -1299,10 +1277,10 @@ def calculate_metrics(model,test_loader):
     print(f"FRR : {FRR:.4f}")
     print(f"HTER: {HTER:.4f}")
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 calculate_metrics(model,test_loader)
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 def calculate_roc(model,test_loader): 
     model.eval()
     
@@ -1407,10 +1385,10 @@ def calculate_roc(model,test_loader):
     
     plt.show()
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 calculate_roc(model,test_loader)
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 def calculate_acer(model, test_loader,threshold=0.5):
     model.eval()
     
@@ -1535,5 +1513,310 @@ def calculate_acer(model, test_loader,threshold=0.5):
     
     return apcer, bpcer, acer
 
-# %% [code] {"jupyter":{"outputs_hidden":false}}
+# %% [code]
 apcer, bpcer, acer = calculate_acer(model, test_loader)
+
+# %% [code]
+# !pip install umap-learn    # run in a notebook, or: pip install umap-learn
+
+# %% [code]
+import seaborn as sns
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+import umap
+
+
+def extract_embeddings(model, dataloader):
+    """
+    Extract embeddings from the layer immediately before
+    the final Linear classification layer using a forward hook.
+    """
+
+    model = model.to(DEVICE)
+    model.eval()
+
+    # ---------------------------------------------------------
+    # Find the final Linear layer
+    # ---------------------------------------------------------
+    linear_layers = []
+
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.Linear):
+            linear_layers.append((name, module))
+
+    if len(linear_layers) == 0:
+        raise ValueError("No Linear layer found in the model.")
+
+    final_layer_name, final_layer = linear_layers[-1]
+
+    print("Final classification layer:")
+    print(final_layer_name)
+    print(final_layer)
+
+    # ---------------------------------------------------------
+    # Container for captured embeddings
+    # ---------------------------------------------------------
+    captured = {}
+
+    def hook_fn(module, input, output):
+        # input[0] is the feature vector entering
+        # the final classification layer
+        captured["embedding"] = input[0].detach()
+
+    # Register hook
+    hook_handle = final_layer.register_forward_hook(hook_fn)
+
+    all_embeddings = []
+    all_labels = []
+
+    print("\nExtracting embeddings...")
+
+    try:
+
+        with torch.no_grad():
+
+            for images, labels, image_paths, mask_paths, map_paths in dataloader:
+
+                # -------------------------------------------------
+                # Load binary maps
+                # -------------------------------------------------
+
+                maps = convert_paths_tensors(map_paths)
+
+                maps = maps.float()
+                maps = maps.to(DEVICE)
+
+                # -------------------------------------------------
+                # Forward pass
+                # -------------------------------------------------
+
+                captured.clear()
+
+                _ = model(maps)
+
+                # -------------------------------------------------
+                # Get features entering classifier
+                # -------------------------------------------------
+
+                embeddings = captured["embedding"]
+
+                # Make sure embeddings are [B, embedding_dim]
+                if embeddings.dim() > 2:
+                    embeddings = torch.flatten(
+                        embeddings,
+                        start_dim=1
+                    )
+
+                all_embeddings.append(
+                    embeddings.cpu().numpy()
+                )
+
+                all_labels.append(
+                    labels.cpu().numpy()
+                )
+
+    finally:
+
+        # Always remove hook
+        hook_handle.remove()
+
+    # ---------------------------------------------------------
+    # Concatenate all batches
+    # ---------------------------------------------------------
+
+    all_embeddings = np.concatenate(
+        all_embeddings,
+        axis=0
+    )
+
+    all_labels = np.concatenate(
+        all_labels,
+        axis=0
+    )
+
+    print(
+        f"\nExtracted embeddings shape: "
+        f"{all_embeddings.shape}"
+    )
+
+    print(
+        f"Labels shape: "
+        f"{all_labels.shape}"
+    )
+
+    return all_embeddings, all_labels
+
+# %% [code]
+def plot_dimensionality_reduction(
+    embeddings,
+    labels,
+    class_names=["spoof", "live"]
+):
+
+    print("Computing PCA...")
+
+    pca = PCA(n_components=2)
+
+    pca_result = pca.fit_transform(
+        embeddings
+    )
+
+    print(
+        "PCA explained variance:",
+        pca.explained_variance_ratio_
+    )
+
+    # =====================================================
+    # PCA
+    # =====================================================
+
+    plt.figure(figsize=(8, 6))
+
+    sns.scatterplot(
+        x=pca_result[:, 0],
+        y=pca_result[:, 1],
+        hue=[
+            class_names[int(x)]
+            for x in labels
+        ],
+        palette=sns.color_palette(
+            "husl",
+            len(class_names)
+        ),
+        alpha=0.7
+    )
+
+    plt.title(
+        "PCA - BinaryMapTransformer Embeddings",
+        fontsize=14
+    )
+
+    plt.xlabel("Principal Component 1")
+    plt.ylabel("Principal Component 2")
+    plt.legend(title="Classes")
+
+    plt.tight_layout()
+
+    plt.savefig(
+        f"{OUTPUT_ROOT}/BinaryMapTransformer_PCA.png",
+        dpi=300,
+        bbox_inches="tight"
+    )
+
+    plt.show()
+    plt.close()
+
+    # =====================================================
+    # t-SNE
+    # =====================================================
+
+    print("Computing t-SNE...")
+
+    tsne = TSNE(
+        n_components=2,
+        perplexity=30,
+        max_iter=1000,
+        random_state=42
+    )
+
+    tsne_result = tsne.fit_transform(
+        embeddings
+    )
+
+    plt.figure(figsize=(8, 6))
+
+    sns.scatterplot(
+        x=tsne_result[:, 0],
+        y=tsne_result[:, 1],
+        hue=[
+            class_names[int(x)]
+            for x in labels
+        ],
+        palette=sns.color_palette(
+            "husl",
+            len(class_names)
+        ),
+        alpha=0.7
+    )
+
+    plt.title(
+        "t-SNE - BinaryMapTransformer Embeddings",
+        fontsize=14
+    )
+
+    plt.xlabel("t-SNE Dimension 1")
+    plt.ylabel("t-SNE Dimension 2")
+    plt.legend(title="Classes")
+
+    plt.tight_layout()
+
+    plt.savefig(
+        f"{OUTPUT_ROOT}/BinaryMapTransformer_tSNE.png",
+        dpi=300,
+        bbox_inches="tight"
+    )
+
+    plt.show()
+    plt.close()
+
+    # =====================================================
+    # UMAP
+    # =====================================================
+
+    print("Computing UMAP...")
+
+    umap_reducer = umap.UMAP(
+        n_components=2,
+        random_state=42
+    )
+
+    umap_result = umap_reducer.fit_transform(
+        embeddings
+    )
+
+    plt.figure(figsize=(8, 6))
+
+    sns.scatterplot(
+        x=umap_result[:, 0],
+        y=umap_result[:, 1],
+        hue=[
+            class_names[int(x)]
+            for x in labels
+        ],
+        palette=sns.color_palette(
+            "husl",
+            len(class_names)
+        ),
+        alpha=0.7
+    )
+
+    plt.title(
+        "UMAP - BinaryMapTransformer Embeddings",
+        fontsize=14
+    )
+
+    plt.xlabel("UMAP Dimension 1")
+    plt.ylabel("UMAP Dimension 2")
+    plt.legend(title="Classes")
+
+    plt.tight_layout()
+
+    plt.savefig(
+        f"{OUTPUT_ROOT}/BinaryMapTransformer_UMAP.png",
+        dpi=300,
+        bbox_inches="tight"
+    )
+
+    plt.show()
+    plt.close()
+
+# %% [code]
+embeddings, labels = extract_embeddings(
+    model,
+    test_loader
+)
+
+plot_dimensionality_reduction(
+    embeddings,
+    labels
+)

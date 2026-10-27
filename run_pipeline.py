@@ -5,9 +5,10 @@ Run the full face anti-spoofing pipeline.
 
 Steps (all run by default, in this order):
     masks     create the training masks with the pre-trained DeepLabV3
-    finetune  LoRA fine-tuning of DeepLabV3 on these masks + segmentation metrics
+              (live: foreground mask, spoof: all-black mask)
+    finetune  LoRA fine-tuning of DeepLabV3 on these masks (20 epochs) + segmentation metrics
     maps      binary maps predicted by the fine-tuned DeepLabV3
-    classify  train the lightweight Transformer on the maps and evaluate it
+    classify  train the lightweight Transformer on the maps, evaluate it, plot its embeddings
 
 The sampled train/test image lists are written to <output_root>/splits/ and
 reused by later runs with the same output folder, so the steps can also be run
@@ -27,15 +28,14 @@ import torch.optim as optim
 from src.config import load_config, save_config
 from src.data import build_loaders, load_file_list, sample_splits, save_file_list
 from src.engine import (calculate_pixel_auc, compute_dataset_iou, create_feature_maps, create_masks,
-                        evaluate_classifier, evaluate_pretrained_baseline, fine_tune_model,
-                        plot_segmentation_examples, train_classifier)
+                        evaluate_classifier, evaluate_pretrained_baseline, extract_embeddings,
+                        final_checkpoint_name, fine_tune_model, plot_segmentation_examples, train_classifier)
 from src.models import BinaryMapTransformer, ModifiedDeepLabV3_DeepLoRA, count_params, get_mask_creator_model
 from src.transforms import get_image_transform
-from src.utils import (get_device, load_checkpoint, plot_history, resolve_num_workers, save_checkpoint,
-                       save_json, set_seed)
+from src.utils import (get_device, load_checkpoint, plot_dimensionality_reduction, plot_history,
+                       resolve_num_workers, save_json, set_seed)
 
 ALL_STEPS = ["masks", "finetune", "maps", "classify"]
-FINAL_SEGMENTATION_CHECKPOINT = "deeplabv3_lora_final.pth.tar"
 CLASSIFIER_CHECKPOINT = "transformer_classifier.pth"
 
 
@@ -90,8 +90,8 @@ def main():
     output_root = Path(cfg.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
     checkpoint_dir = output_root / "checkpoints"
-    save_config(cfg, output_root / "config_used.yaml")
 
+    save_config(cfg, output_root / "config_used.yaml")
     set_seed(cfg.seed)
     device = get_device(cfg.device)
     print(f"Device: {device} | steps: {', '.join(steps)}")
@@ -140,17 +140,16 @@ def main():
         loss_function = nn.MSELoss()
         optimizer = optim.Adam(segmentation_model.parameters(), lr=cfg.segmentation.learning_rate)
 
-        history, info = fine_tune_model(segmentation_model, loss_function, optimizer,
-                                        train_loader, test_loader, cfg.segmentation, device, checkpoint_dir)
+        # Trains for cfg.segmentation.epochs epochs and saves checkpoints/Epoch-<epochs>.pth.tar.
+        history = fine_tune_model(segmentation_model, loss_function, optimizer,
+                                  train_loader, test_loader, cfg.segmentation, device, checkpoint_dir)
         plot_history(history, output_root)
-        save_checkpoint({"state_dict": segmentation_model.state_dict(), "optimizer": optimizer.state_dict()},
-                        checkpoint_dir / FINAL_SEGMENTATION_CHECKPOINT)
         timings["finetune_s"] = time.time() - t0
 
-        # Segmentation metrics of the final (last-epoch) model.
+        # Segmentation metrics of the final-epoch model.
         test_iou = compute_dataset_iou(segmentation_model, test_loader, device)
         print(f"Test IoU (fine-tuned DeepLabV3): {test_iou:.4f}")
-        segmentation_results = {"test_iou": test_iou, **info,
+        segmentation_results = {"test_iou": test_iou, "epochs": cfg.segmentation.epochs,
                                 "trainable_params": count_params(segmentation_model)[1]}
         if cfg.evaluation.plot_examples:
             plot_segmentation_examples(segmentation_model, test_loader, device, test_iou,
@@ -167,7 +166,8 @@ def main():
     if "maps" in steps:
         t0 = time.time()
         if segmentation_model is None:
-            checkpoint = args.segmentation_checkpoint or checkpoint_dir / FINAL_SEGMENTATION_CHECKPOINT
+            checkpoint = (args.segmentation_checkpoint
+                          or checkpoint_dir / final_checkpoint_name(cfg.segmentation.epochs))
             if not Path(checkpoint).exists():
                 sys.exit(f"Segmentation checkpoint not found: {checkpoint}")
             segmentation_model = build_segmentation_model(cfg, device)
@@ -200,14 +200,23 @@ def main():
         metrics = evaluate_classifier(classifier, test_loader, device, output_root, cfg.evaluation.threshold)
         metrics["params"] = total
         results["classifier"] = metrics
+        write_metrics(output_root, results, timings)   # keep the metrics even if a plot below fails
 
-    # Merge with the results of earlier runs in the same output folder (when steps are run separately).
+        if cfg.evaluation.embedding_plots:
+            embeddings, labels = extract_embeddings(classifier, test_loader, device)
+            metrics.update(plot_dimensionality_reduction(embeddings, labels, output_root))
+
+    write_metrics(output_root, results, timings)
+    print(f"Results written to {output_root.resolve()}")
+
+
+def write_metrics(output_root: Path, results: dict, timings: dict) -> None:
+    """Merge with the results of earlier runs in the same output folder (when steps are run separately)."""
     metrics_path = output_root / "metrics.json"
     merged = json.loads(metrics_path.read_text()) if metrics_path.exists() else {}
     merged.update(results)
     merged["timings"] = {**merged.get("timings", {}), **timings}
     save_json(merged, metrics_path)
-    print(f"Results written to {output_root.resolve()}")
 
 
 if __name__ == "__main__":
