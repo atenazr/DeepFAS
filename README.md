@@ -1,6 +1,6 @@
-# DEEPFAS: Face Anti-Spoofing with LoRA-Adapted DeepLabV3 Masks and a Lightweight Transformer
+# DEEPFAS
 
-Official code for the paper **"PAPER TITLE"**.
+Official code for the paper **"Mask-Based Face Anti-Spoofing via LoRA-Adapted Human Body Segmentation"**.
 
 The pipeline decides whether a face image is **live** (bona fide) or a **spoof** (presentation attack) in two stages:
 
